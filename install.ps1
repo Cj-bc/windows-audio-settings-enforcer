@@ -1,14 +1,14 @@
 param(
+    [switch]$Install,
     [switch]$Uninstall,
     [switch]$Help
 )
 
-if ($Help) {
-    Write-Host @"
+$usageText = @"
 AudioSettingsEnforcer Installer
 
 USAGE:
-    .\install.ps1              Install or reinstall the tray app
+    .\install.ps1 -Install     Install or reinstall the tray app
     .\install.ps1 -Uninstall   Uninstall the tray app
     .\install.ps1 -Help        Show this help message
 
@@ -21,7 +21,7 @@ DESCRIPTION:
     - Preserves user-edited appsettings.json during reinstall
 
 INSTALLATION:
-    1. Run the script
+    1. Run the script with -Install
     2. Tweak settings from the task tray icon (or edit appsettings.json;
        the app reloads it live)
 
@@ -29,6 +29,14 @@ UNINSTALLATION:
     Run the script with -Uninstall flag to remove the app and all files.
 
 "@
+
+if ($Help) {
+    Write-Host $usageText
+    exit 0
+}
+
+if (-not $Install -and -not $Uninstall) {
+    Write-Host $usageText
     exit 0
 }
 
@@ -92,7 +100,7 @@ try {
         Write-Host ""
         Write-Host "Uninstallation complete." -ForegroundColor Green
         Write-Host ""
-    } else {
+    } elseif ($Install) {
         # ========== INSTALL FLOW ==========
         $backupConfig = $null
         if (Test-Path (Join-Path $InstallDir $ConfigName)) {
