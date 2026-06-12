@@ -1,6 +1,36 @@
 param(
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [switch]$Help
 )
+
+if ($Help) {
+    Write-Host @"
+AudioSettingsEnforcer Service Installer
+
+USAGE:
+    .\install.ps1              Install or reinstall the service
+    .\install.ps1 -Uninstall   Uninstall the service
+    .\install.ps1 -Help        Show this help message
+
+DESCRIPTION:
+    Installs, reinstalls, or uninstalls the AudioSettingsEnforcer Windows service.
+
+    - Requires administrator privileges (will self-elevate if needed)
+    - Builds and publishes the project before installation
+    - Configures automatic startup and Audiosrv dependency
+    - Preserves user-edited appsettings.json during reinstall
+
+INSTALLATION:
+    1. Run the script (will prompt for elevation if needed)
+    2. Edit appsettings.json in Program Files\AudioSettingsEnforcer to configure
+    3. Service starts automatically and watches the config file for changes
+
+UNINSTALLATION:
+    Run the script with -Uninstall flag to remove the service and all files.
+
+"@
+    exit 0
+}
 
 $ErrorActionPreference = 'Stop'
 
