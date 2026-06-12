@@ -21,21 +21,29 @@ public sealed class AudioEnforcerService : BackgroundService
 
     private readonly ILogger<AudioEnforcerService> _logger;
     private readonly IOptionsMonitor<AudioOptions> _options;
+    private readonly EnforcementState _state;
     private readonly Channel<Signal> _signals = Channel.CreateUnbounded<Signal>();
 
     private MMDeviceEnumerator? _enumerator;
     private MMDevice? _device;
 
-    public AudioEnforcerService(ILogger<AudioEnforcerService> logger, IOptionsMonitor<AudioOptions> options)
+    public AudioEnforcerService(
+        ILogger<AudioEnforcerService> logger,
+        IOptionsMonitor<AudioOptions> options,
+        EnforcementState state)
     {
         _logger = logger;
         _options = options;
+        _state = state;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         using var optionsChangeSubscription =
             _options.OnChange(_ => _signals.Writer.TryWrite(Signal.Apply));
+
+        void OnStateChanged() => _signals.Writer.TryWrite(Signal.Apply);
+        _state.Changed += OnStateChanged;
 
         _enumerator = new MMDeviceEnumerator();
         var notificationClient = new NotificationClient(_signals.Writer);
@@ -66,6 +74,7 @@ public sealed class AudioEnforcerService : BackgroundService
         }
         finally
         {
+            _state.Changed -= OnStateChanged;
             _enumerator.UnregisterEndpointNotificationCallback(notificationClient);
             Detach();
             _enumerator.Dispose();
@@ -131,6 +140,11 @@ public sealed class AudioEnforcerService : BackgroundService
 
     private void ApplyIfNeeded()
     {
+        if (!_state.Enabled)
+        {
+            return;
+        }
+
         if (_device is null)
         {
             Attach();

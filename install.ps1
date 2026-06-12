@@ -5,28 +5,28 @@ param(
 
 if ($Help) {
     Write-Host @"
-AudioSettingsEnforcer Service Installer
+AudioSettingsEnforcer Installer
 
 USAGE:
-    .\install.ps1              Install or reinstall the service
-    .\install.ps1 -Uninstall   Uninstall the service
+    .\install.ps1              Install or reinstall the tray app
+    .\install.ps1 -Uninstall   Uninstall the tray app
     .\install.ps1 -Help        Show this help message
 
 DESCRIPTION:
-    Installs, reinstalls, or uninstalls the AudioSettingsEnforcer Windows service.
+    Installs, reinstalls, or uninstalls the AudioSettingsEnforcer tray app
+    for the current user. No administrator privileges required.
 
-    - Requires administrator privileges (will self-elevate if needed)
-    - Builds and publishes the project before installation
-    - Configures automatic startup and Audiosrv dependency
+    - Installs to %LocalAppData%\AudioSettingsEnforcer
+    - Starts automatically at logon (HKCU Run key)
     - Preserves user-edited appsettings.json during reinstall
 
 INSTALLATION:
-    1. Run the script (will prompt for elevation if needed)
-    2. Edit appsettings.json in Program Files\AudioSettingsEnforcer to configure
-    3. Service starts automatically and watches the config file for changes
+    1. Run the script
+    2. Tweak settings from the task tray icon (or edit appsettings.json;
+       the app reloads it live)
 
 UNINSTALLATION:
-    Run the script with -Uninstall flag to remove the service and all files.
+    Run the script with -Uninstall flag to remove the app and all files.
 
 "@
     exit 0
@@ -35,15 +35,13 @@ UNINSTALLATION:
 $ErrorActionPreference = 'Stop'
 
 # Constants
-$ServiceName    = 'AudioSettingsEnforcer'
-$ServiceDep     = 'Audiosrv'
-$ServiceDisplay = 'Audio Settings Enforcer'
-$ServiceDesc    = 'Enforces master audio volume and mute state for the default playback device.'
-$InstallDir     = "$env:ProgramFiles\AudioSettingsEnforcer"
-$BinaryName     = 'windows-audio-settings-enforcer.exe'
-$ConfigName     = 'appsettings.json'
-$ProjectRoot    = $PSScriptRoot
-$PublishDir     = "$ProjectRoot\bin\Release\net10.0-windows\win-x64\publish"
+$AppName     = 'AudioSettingsEnforcer'
+$InstallDir  = "$env:LocalAppData\AudioSettingsEnforcer"
+$BinaryName  = 'windows-audio-settings-enforcer.exe'
+$ConfigName  = 'appsettings.json'
+$RunKeyPath  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$ProjectRoot = $PSScriptRoot
+$PublishDir  = "$ProjectRoot\bin\Release\net10.0-windows\win-x64\publish"
 
 # Helper functions
 function Write-Step {
@@ -56,48 +54,36 @@ function Write-OK {
     Write-Host "    OK: $Message" -ForegroundColor Green
 }
 
-# Elevation check
-function Test-IsAdmin {
-    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = [Security.Principal.WindowsPrincipal]$id
-    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
-if (-not (Test-IsAdmin)) {
-    Write-Warning "This script must run as Administrator."
-    Write-Host "Re-launching elevated..." -ForegroundColor Yellow
-    $argList = @('-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
-    if ($Uninstall) { $argList += '-Uninstall' }
-    Start-Process pwsh -Verb RunAs -ArgumentList $argList
-    exit
+function Stop-RunningInstance {
+    $installedBinary = Join-Path $InstallDir $BinaryName
+    $running = Get-Process -Name ([System.IO.Path]::GetFileNameWithoutExtension($BinaryName)) -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -eq $installedBinary }
+    if ($running) {
+        $running | Stop-Process -Force
+        $running | ForEach-Object { try { $_.WaitForExit(10000) | Out-Null } catch {} }
+        Write-OK "Running instance stopped."
+    } else {
+        Write-OK "No running instance found."
+    }
 }
 
 try {
     if ($Uninstall) {
         # ========== UNINSTALL FLOW ==========
-        Write-Step "Checking for installed service..."
-        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-        if (-not $svc) {
-            Write-Host "Service '$ServiceName' is not installed. Nothing to uninstall." -ForegroundColor Yellow
-            exit 0
-        }
+        Write-Step "Stopping running instance..."
+        Stop-RunningInstance
 
-        Write-Step "Stopping service '$ServiceName'..."
-        if ($svc.Status -ne 'Stopped') {
-            Stop-Service -Name $ServiceName -Force -ErrorAction Stop
-            $svc.WaitForStatus('Stopped', (New-TimeSpan -Seconds 15))
-            Write-OK "Service stopped."
+        Write-Step "Removing autostart entry..."
+        if (Get-ItemProperty -Path $RunKeyPath -Name $AppName -ErrorAction SilentlyContinue) {
+            Remove-ItemProperty -Path $RunKeyPath -Name $AppName
+            Write-OK "Autostart entry removed."
         } else {
-            Write-OK "Service was already stopped."
+            Write-OK "Autostart entry already absent."
         }
-
-        Write-Step "Removing service registration..."
-        Remove-Service -Name $ServiceName -ErrorAction Stop
-        Write-OK "Service deleted."
 
         Write-Step "Removing install directory '$InstallDir'..."
         if (Test-Path $InstallDir) {
-            Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction Stop
+            Remove-Item -Path $InstallDir -Recurse -Force
             Write-OK "Directory removed."
         } else {
             Write-OK "Directory already absent."
@@ -108,19 +94,8 @@ try {
         Write-Host ""
     } else {
         # ========== INSTALL FLOW ==========
-        Write-Step "Checking for existing installation..."
-        $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-        if ($existingService) {
-            Write-Warning "Service '$ServiceName' is already installed (Status: $($existingService.Status))."
-            $answer = Read-Host "Reinstall? This will stop and replace the existing service. [y/N]"
-            if ($answer -notmatch '^[Yy]$') {
-                Write-Host "Installation skipped." -ForegroundColor Yellow
-                exit 0
-            }
-        }
-
         $backupConfig = $null
-        if ($existingService -and (Test-Path (Join-Path $InstallDir $ConfigName))) {
+        if (Test-Path (Join-Path $InstallDir $ConfigName)) {
             Write-Step "Backing up existing configuration..."
             $backupConfig = [System.IO.Path]::GetTempFileName()
             Copy-Item (Join-Path $InstallDir $ConfigName) $backupConfig -Force
@@ -144,12 +119,8 @@ try {
             throw "Published binary not found at '$sourceBinary'. Aborting."
         }
 
-        if ($existingService -and $existingService.Status -ne 'Stopped') {
-            Write-Step "Stopping existing service..."
-            Stop-Service -Name $ServiceName -Force -ErrorAction Stop
-            $existingService.WaitForStatus('Stopped', (New-TimeSpan -Seconds 15))
-            Write-OK "Service stopped."
-        }
+        Write-Step "Stopping running instance..."
+        Stop-RunningInstance
 
         Write-Step "Installing files to '$InstallDir'..."
         if (-not (Test-Path $InstallDir)) {
@@ -165,54 +136,20 @@ try {
             Write-OK "User configuration restored."
         }
 
-        Write-Step "Registering Windows service..."
+        Write-Step "Registering autostart entry..."
         $installedBinary = Join-Path $InstallDir $BinaryName
+        Set-ItemProperty -Path $RunKeyPath -Name $AppName -Value "`"$installedBinary`""
+        Write-OK "App will start at logon."
 
-        if ($existingService) {
-            sc.exe config $ServiceName binPath= "`"$installedBinary`"" start= auto | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                throw "sc.exe config failed."
-            }
-            Write-OK "Service registration updated."
-        } else {
-            New-Service `
-                -Name        $ServiceName `
-                -DisplayName $ServiceDisplay `
-                -Description $ServiceDesc `
-                -BinaryPathName "`"$installedBinary`"" `
-                -StartupType Automatic `
-                -DependsOn   $ServiceDep `
-                -ErrorAction Stop | Out-Null
-            Write-OK "Service registered."
-        }
-
-        sc.exe config $ServiceName depend= $ServiceDep | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Failed to set service dependency. The service may not start if Audiosrv is unavailable."
-        }
-
-        Write-Step "Starting service '$ServiceName'..."
-        Start-Service -Name $ServiceName -ErrorAction Stop
-        $svc = Get-Service -Name $ServiceName
-        try {
-            $svc.WaitForStatus('Running', (New-TimeSpan -Seconds 10))
-        } catch {
-            # WaitForStatus throws if timeout; we want to warn, not fail
-        }
-
-        $finalStatus = (Get-Service -Name $ServiceName).Status
-        if ($finalStatus -eq 'Running') {
-            Write-OK "Service is running."
-        } else {
-            Write-Host "    WARNING: Service status is '$finalStatus' (expected 'Running')." -ForegroundColor Yellow
-            Write-Host "    Check Event Viewer for details." -ForegroundColor Yellow
-        }
+        Write-Step "Starting the app..."
+        Start-Process -FilePath $installedBinary -WorkingDirectory $InstallDir
+        Write-OK "App started."
 
         Write-Host ""
         Write-Host "Installation complete." -ForegroundColor Green
         Write-Host "  Install dir : $InstallDir"
         Write-Host "  Config file : $(Join-Path $InstallDir $ConfigName)"
-        Write-Host "  Edit the config file to change volume/mute settings; the service reloads it live."
+        Write-Host "  Use the task tray icon to tweak settings or toggle enforcement."
         Write-Host ""
     }
 } catch {
